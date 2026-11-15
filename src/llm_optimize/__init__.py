@@ -4,9 +4,12 @@ Pipeline: Failure Miner -> Activation Tracer -> Weight Editor -> Validator.
 """
 
 from .activation_tracer import ActivationTracer
+from .evaluator import Evaluator, contains_match, exact_match, load_questions
 from .failure_miner import FailureMiner
 from .model_adapter import MockModel, TransformersAdapter
+from .optimizer import GreedyPatchOptimizer, OptimizationResult, ScaleSearchResult
 from .orchestrator import Orchestrator
+from .stats import StatisticalRanker, cliffs_delta
 from .types import (
     EvalResult,
     NeuronEvidence,
@@ -22,17 +25,26 @@ __version__ = "0.1.0"
 
 __all__ = [
     "ActivationTracer",
+    "Evaluator",
     "EvalResult",
     "FailureMiner",
+    "contains_match",
+    "exact_match",
+    "load_questions",
+    "GreedyPatchOptimizer",
     "MockModel",
     "NeuronEvidence",
+    "OptimizationResult",
     "Orchestrator",
     "PatchValidation",
     "Question",
     "Report",
+    "ScaleSearchResult",
+    "StatisticalRanker",
     "TransformersAdapter",
     "Validator",
     "WeightEditor",
     "WeightPatch",
+    "cliffs_delta",
     "__version__",
 ]

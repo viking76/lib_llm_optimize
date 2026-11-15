@@ -8,9 +8,18 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Sequence
 
 from .activation_tracer import ActivationTracer
+from .evaluator import Evaluator
 from .failure_miner import FailureMiner
 from .model_adapter import ModelAdapter
-from .types import EvalResult, NeuronEvidence, PatchValidation, Question, Report, WeightPatch
+from .optimizer import GreedyPatchOptimizer
+from .types import (
+    EvalResult,
+    NeuronEvidence,
+    PatchValidation,
+    Question,
+    Report,
+    WeightPatch,
+)
 from .validator import Validator
 from .weight_editor import WeightEditor
 
@@ -23,12 +32,16 @@ class Orchestrator:
         tracer: Optional[ActivationTracer] = None,
         editor: Optional[WeightEditor] = None,
         validator: Optional[Validator] = None,
+        optimizer: Optional[GreedyPatchOptimizer] = None,
+        evaluator: Optional[Evaluator] = None,
     ) -> None:
         self.model = model
         self.miner = miner or FailureMiner()
         self.tracer = tracer or ActivationTracer(model)
         self.editor = editor or WeightEditor()
         self.validator = validator or Validator()
+        self.optimizer = optimizer
+        self.evaluator = evaluator
 
     def run(
         self,
@@ -36,6 +49,7 @@ class Orchestrator:
         results: Sequence[EvalResult],
         top_k_neurons: int = 20,
         max_patches: Optional[int] = None,
+        trace_method: str = "ratio",
     ) -> Report:
         if max_patches is not None:
             self.editor.max_patches = max_patches
@@ -47,16 +61,39 @@ class Orchestrator:
             failed=failed,
             baseline=passing,
             top_k=top_k_neurons,
+            method=trace_method,
         )
-        patches: List[WeightPatch] = self.editor.propose(evidence, failed)
-        validations: List[PatchValidation] = self.validator.validate(
-            model=self.model,
-            patches=patches,
-            failed=failed,
-            passing=passing,
-        )
-        accepted = [v for v in validations if v.accepted]
-        summary = self._summary(total, failed, accepted)
+
+        optimization = None
+        if self.optimizer is not None:
+            optimization = self.optimizer.optimize(
+                model=self.model,
+                evidence=evidence,
+                failed=failed,
+                passing=passing,
+            )
+            validations = [
+                PatchValidation(
+                    patch=patch,
+                    failed_fixed_rate=optimization.combined_fix_rate,
+                    regression_rate=optimization.combined_regression_rate,
+                    accepted=optimization.combined_accepted,
+                    notes=["Validated as part of the combined optimized edit."],
+                )
+                for patch in optimization.combined_patches
+            ]
+            summary = self._summary_optimized(total, failed, optimization)
+        else:
+            patches: List[WeightPatch] = self.editor.propose(evidence, failed)
+            validations = self.validator.validate(
+                model=self.model,
+                patches=patches,
+                failed=failed,
+                passing=passing,
+            )
+            accepted = [v for v in validations if v.accepted]
+            summary = self._summary(total, failed, accepted)
+
         return Report(
             total_questions=total,
             failed_questions=len(failed),
@@ -64,6 +101,26 @@ class Orchestrator:
             top_neurons=evidence,
             validations=validations,
             summary=summary,
+            optimization=optimization,
+        )
+
+    def run_from_questions(
+        self,
+        questions: Sequence[Question],
+        top_k_neurons: int = 20,
+        max_patches: Optional[int] = None,
+        trace_method: str = "ratio",
+    ) -> Report:
+        """Full self-service entry point: the library evaluates the questions
+        itself on the model, then runs the 4-agent pipeline on the results.
+        """
+        results = (self.evaluator or Evaluator(self.model)).evaluate(questions)
+        return self.run(
+            questions,
+            results,
+            top_k_neurons=top_k_neurons,
+            max_patches=max_patches,
+            trace_method=trace_method,
         )
 
     @staticmethod
@@ -77,6 +134,24 @@ class Orchestrator:
             for r in results
             if r.passed and r.question_id in by_id
         ]
+
+    @staticmethod
+    def _summary_optimized(
+        total: int, failed: List[Question], optimization
+    ) -> str:
+        if not failed:
+            return "The model passed every question; no weakness to analyze."
+        status = "accepted" if optimization.combined_accepted else "rejected"
+        lines = [
+            f"{len(failed)}/{total} questions failed. Optimized combined edit "
+            f"({len(optimization.combined_patches)} patch(s)) {status}: fixes "
+            f"{optimization.combined_fix_rate:.0%} of failures with "
+            f"{optimization.combined_regression_rate:.0%} regressions "
+            f"(objective {optimization.objective:.3f})."
+        ]
+        for patch in optimization.combined_patches:
+            lines.append(f"- {patch.patch_id}: {patch.describe()}")
+        return "\n".join(lines)
 
     @staticmethod
     def _summary(

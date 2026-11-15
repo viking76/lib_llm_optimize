@@ -1,0 +1,18 @@
+{"id": "math-01", "text": "What is 2 + 3?", "expected_answer": "5", "category": "math"}
+{"id": "math-02", "text": "What is 7 + 8?", "expected_answer": "15", "category": "math"}
+{"id": "math-03", "text": "What is 12 + 15?", "expected_answer": "27", "category": "math"}
+{"id": "math-04", "text": "What is 9 times 3?", "expected_answer": "27", "category": "math"}
+{"id": "math-05", "text": "What is 6 minus 4?", "expected_answer": "2", "category": "math"}
+{"id": "facts-01", "text": "What is the capital of France?", "expected_answer": "Paris", "category": "facts"}
+{"id": "facts-02", "text": "What is the capital of Japan?", "expected_answer": "Tokyo", "category": "facts"}
+{"id": "facts-03", "text": "What color is the sky on a clear day?", "expected_answer": "blue", "category": "facts"}
+{"id": "facts-04", "text": "How many legs does a spider have?", "expected_answer": "8", "category": "facts"}
+{"id": "facts-05", "text": "What is the largest planet in the solar system?", "expected_answer": "Jupiter", "category": "facts"}
+{"id": "lang-01", "text": "What is the plural of 'cat'?", "expected_answer": "cats", "category": "language"}
+{"id": "lang-02", "text": "What is the opposite of 'hot'?", "expected_answer": "cold", "category": "language"}
+{"id": "lang-03", "text": "Complete: 'Once upon a' what?", "expected_answer": "time", "category": "language"}
+{"id": "reason-01", "text": "If all cats are animals and Tom is a cat, is Tom an animal? Answer yes or no.", "expected_answer": "yes", "category": "reasoning"}
+{"id": "reason-02", "text": "I have 3 apples and buy 2 more. How many apples do I have?", "expected_answer": "5", "category": "reasoning"}
+{"id": "reason-03", "text": "What comes next in the sequence: 2, 4, 6, 8, ...?", "expected_answer": "10", "category": "reasoning"}
+{"id": "reason-04", "text": "If today is Monday, what day is tomorrow?", "expected_answer": "Tuesday", "category": "reasoning"}
+{"id": "reason-05", "text": "Anne is taller than Ben. Ben is taller than Carol. Who is the shortest?", "expected_answer": "Carol", "category": "reasoning"}

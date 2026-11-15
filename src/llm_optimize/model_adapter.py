@@ -14,7 +14,7 @@ Any custom model only has to implement :class:`ModelAdapter`.
 from __future__ import annotations
 
 import hashlib
-from typing import Dict, List, Protocol, Sequence, Tuple
+from typing import Dict, List, Optional, Protocol, Sequence, Tuple
 
 import numpy as np
 
@@ -34,6 +34,18 @@ class ModelAdapter(Protocol):
 
     def activations(self, texts: Sequence[str]) -> ActivationMap:
         """Return mean activation per layer: {layer_index: array[n_neurons]}."""
+        ...
+
+    def per_question_activations(self, texts: Sequence[str]) -> Dict[int, np.ndarray]:
+        """Return per-question activations: {layer: array[n_questions, n_neurons]}."""
+        ...
+
+    def layer_inputs(self, texts: Sequence[str]) -> Dict[int, np.ndarray]:
+        """Return per-question layer inputs: {layer: array[n_questions, in_dim]}."""
+        ...
+
+    def apply_rank_one(self, layer: int, key: np.ndarray, delta: np.ndarray) -> None:
+        """Add the rank-one update dW = outer(delta, key) to a layer's weights."""
         ...
 
     def copy(self) -> "ModelAdapter":
@@ -74,6 +86,9 @@ class MockModel:
         trigger_words: Sequence[str] = (),
         quirk_layer: int = 0,
         seed: int = 0,
+        missing_words: Sequence[str] = (),
+        missing_neuron: int = 1,
+        missing_threshold: float = 1.0,
     ) -> None:
         if quirk_layer != 0:
             raise ValueError("MockModel injects the quirk neuron on layer 0")
@@ -81,6 +96,9 @@ class MockModel:
         self.n_neurons = n_neurons
         self.feature_dim = feature_dim
         self.trigger_words = list(trigger_words)
+        self.missing_words = list(missing_words)
+        self.missing_neuron = missing_neuron
+        self.missing_threshold = missing_threshold
         self.quirk_layer = quirk_layer
         rng = np.random.default_rng(seed)
         self.weights: List[np.ndarray] = [
@@ -98,6 +116,14 @@ class MockModel:
             if norm > 0:
                 self.quirk_row /= norm
             self.weights[quirk_layer][self.quirk_neuron] = self.quirk_row * 7.0
+        if self.missing_words:
+            missing_row = np.zeros(feature_dim)
+            for word in self.missing_words:
+                missing_row += _bow(word, feature_dim)
+            norm = np.linalg.norm(missing_row)
+            if norm > 0:
+                missing_row /= norm
+            self.weights[quirk_layer][self.missing_neuron] = missing_row * 5.0
 
     def _forward(self, text: str) -> Tuple[ActivationMap, float]:
         features = _bow(text, self.feature_dim)
@@ -112,21 +138,54 @@ class MockModel:
         return acts, quirk_act
 
     def answer(self, question: Question) -> str:
-        _, quirk_act = self._forward(question.text)
+        acts, quirk_act = self._forward(question.text)
+        if self.missing_words:
+            missing_act = float(acts[self.quirk_layer][self.missing_neuron])
+            if missing_act < self.missing_threshold:
+                return "WRONG"
+            return question.expected_answer
         if quirk_act > 2.0:
             return "WRONG"
         return question.expected_answer
 
-    def activations(self, texts: Sequence[str]) -> ActivationMap:
-        sums: Dict[int, np.ndarray] = {
-            layer: np.zeros(self.n_neurons) for layer in range(self.n_layers)
+    def per_question_activations(self, texts: Sequence[str]) -> Dict[int, np.ndarray]:
+        result: Dict[int, List[np.ndarray]] = {
+            layer: [] for layer in range(self.n_layers)
         }
         for text in texts:
             acts, _ = self._forward(text)
             for layer, act in acts.items():
-                sums[layer] += act
-        n = max(len(texts), 1)
-        return {layer: s / n for layer, s in sums.items()}
+                result[layer].append(act)
+        return {
+            layer: np.stack(rows) if rows else np.zeros((0, self.n_neurons))
+            for layer, rows in result.items()
+        }
+
+    def layer_inputs(self, texts: Sequence[str]) -> Dict[int, np.ndarray]:
+        result: Dict[int, List[np.ndarray]] = {
+            layer: [] for layer in range(self.n_layers)
+        }
+        for text in texts:
+            hidden = _bow(text, self.feature_dim)
+            for layer, W in enumerate(self.weights):
+                result[layer].append(hidden)
+                act = np.maximum(W @ hidden, 0.0)
+                hidden = act / (np.linalg.norm(act) + 1e-9)
+        in_dim = self.weights[0].shape[1]
+        return {
+            layer: np.stack(rows) if rows else np.zeros((0, in_dim))
+            for layer, rows in result.items()
+        }
+
+    def apply_rank_one(self, layer: int, key: np.ndarray, delta: np.ndarray) -> None:
+        self.weights[layer] += np.outer(delta, key)
+
+    def activations(self, texts: Sequence[str]) -> ActivationMap:
+        per_question = self.per_question_activations(texts)
+        return {
+            layer: values.mean(axis=0) if values.size else np.zeros(self.n_neurons)
+            for layer, values in per_question.items()
+        }
 
     def copy(self) -> "MockModel":
         clone = MockModel(
@@ -135,6 +194,9 @@ class MockModel:
             feature_dim=self.feature_dim,
             trigger_words=self.trigger_words,
             quirk_layer=self.quirk_layer,
+            missing_words=self.missing_words,
+            missing_neuron=self.missing_neuron,
+            missing_threshold=self.missing_threshold,
         )
         clone.weights = [W.copy() for W in self.weights]
         return clone
@@ -153,27 +215,48 @@ class TransformersAdapter:
     neuron, i.e. exactly the outgoing weights of one intermediate neuron.
     """
 
-    def __init__(self, model_name_or_path: str, device: str = "cpu") -> None:
+    def __init__(
+        self,
+        model_name_or_path: str,
+        device: str = "cpu",
+        prompt_template: str = "{text}",
+        max_new_tokens: int = 32,
+    ) -> None:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self._torch = torch
+        self.prompt_template = prompt_template
+        self.max_new_tokens = max_new_tokens
         self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path, torch_dtype=torch.float32
         ).to(device)
         self.model.eval()
         self.device = device
+        self._owned: Optional[set] = None
         self._mlp_modules = self._locate_mlp_modules()
         self.n_layers = len(self._mlp_modules)
         self._hooks: list = []
         self._captured: Dict[int, "torch.Tensor"] = {}
 
     def _locate_mlp_modules(self) -> list:
+        """Find decoder MLP blocks and their outgoing projection attr.
+
+        Supports both naming conventions: ``down_proj`` (Llama/OLMo-style)
+        and ``dense_4h_to_h`` (GPT-NeoX / Pythia / GPT-2 ``c_proj``-style
+        handled via the same lookup).
+        """
         modules = []
         for module in self.model.modules():
-            if type(module).__name__ == "MLP" and hasattr(module, "down_proj"):
-                modules.append(module)
+            if "MLP" not in type(module).__name__:
+                continue
+            for attr in ("down_proj", "dense_4h_to_h", "c_proj"):
+                if hasattr(module, attr):
+                    modules.append((module, attr))
+                    break
         if not modules:
             raise ValueError(
                 "No decoder MLP layers found; this adapter targets standard "
@@ -188,7 +271,7 @@ class TransformersAdapter:
 
             return hook
 
-        for layer, mlp in enumerate(self._mlp_modules):
+        for layer, (mlp, _attr) in enumerate(self._mlp_modules):
             self._hooks.append(mlp.register_forward_hook(make_hook(layer)))
 
     def _remove_hooks(self) -> None:
@@ -196,9 +279,15 @@ class TransformersAdapter:
             hook.remove()
         self._hooks.clear()
 
+    def _render(self, text: str) -> str:
+        return self.prompt_template.format(text=text)
+
     def _encode(self, texts: Sequence[str]):
         return self.tokenizer(
-            list(texts), return_tensors="pt", padding=True, truncation=True
+            [self._render(t) for t in texts],
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
         ).to(self.device)
 
     def answer(self, question: Question) -> str:
@@ -207,44 +296,121 @@ class TransformersAdapter:
         inputs = self._encode([question.text])
         with torch.no_grad():
             output_ids = self.model.generate(
-                **inputs, max_new_tokens=32, do_sample=False, pad_token_id=self.tokenizer.eos_token_id
+                **inputs,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=False,
+                pad_token_id=self.tokenizer.eos_token_id,
             )
         new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
-    def activations(self, texts: Sequence[str]) -> ActivationMap:
+    def per_question_activations(self, texts: Sequence[str]) -> Dict[int, np.ndarray]:
         self._captured.clear()
         self._install_hooks()
         try:
             inputs = self._encode(texts)
             with self._torch.no_grad():
                 self.model(**inputs)
+            mask = inputs["attention_mask"].bool()
         finally:
             self._remove_hooks()
-        result: ActivationMap = {}
+        result: Dict[int, np.ndarray] = {}
         for layer, tensor in self._captured.items():
-            act = tensor.abs().mean(dim=(0, 1)).cpu().numpy()
+            act = self._masked_mean(tensor.abs(), mask).cpu().numpy()
             result[layer] = act
         return result
 
+    def activations(self, texts: Sequence[str]) -> ActivationMap:
+        per_question = self.per_question_activations(texts)
+        return {
+            layer: values.mean(axis=0) if values.size else np.zeros(values.shape[1])
+            for layer, values in per_question.items()
+        }
+
+    def layer_inputs(self, texts: Sequence[str]) -> Dict[int, np.ndarray]:
+        """Capture each layer's outgoing-projection input (the intermediate
+        activations), which is the key space of rank-one edits."""
+        captured: Dict[int, List["torch.Tensor"]] = {}
+        pre_hooks: list = []
+
+        def make_pre_hook(layer: int):
+            def hook(_module, args):
+                captured.setdefault(layer, []).append(args[0].detach())
+
+            return hook
+
+        try:
+            for layer, (mlp, attr) in enumerate(self._mlp_modules):
+                proj = getattr(mlp, attr)
+                pre_hooks.append(proj.register_forward_pre_hook(make_pre_hook(layer)))
+            inputs = self._encode(texts)
+            with self._torch.no_grad():
+                self.model(**inputs)
+            mask = inputs["attention_mask"].bool()
+        finally:
+            for hook in pre_hooks:
+                hook.remove()
+        return {
+            layer: self._masked_mean(chunks[0].abs(), mask).cpu().numpy()
+            for layer, chunks in captured.items()
+        }
+
+    def _masked_mean(self, tensor: "torch.Tensor", mask: "torch.Tensor"):
+        expanded = mask.unsqueeze(-1)
+        summed = (tensor * expanded).sum(dim=1)
+        counts = expanded.sum(dim=1).clamp(min=1)
+        return summed / counts
+
+    def apply_rank_one(self, layer: int, key, delta) -> None:
+        mlp, attr = self._mlp_modules[layer]
+        proj = getattr(mlp, attr)
+        weight = self._ensure_owned(proj)
+        with self._torch.no_grad():
+            weight += self._torch.as_tensor(
+                np.outer(delta, key), dtype=weight.dtype,
+                device=weight.device,
+            )
+
     def copy(self) -> "TransformersAdapter":
+        """Copy-on-write clone: weights are shared with the original until an
+        edit is applied, so testing many candidate patches is cheap."""
+        import torch
+        from transformers import AutoModelForCausalLM
+
         clone = TransformersAdapter.__new__(TransformersAdapter)
         clone._torch = self._torch
         clone.tokenizer = self.tokenizer
-        clone.model = type(self.model).from_config(
-            self.model.config
-        ).to(device=self.device, dtype=next(self.model.parameters()).dtype)
-        clone.model.load_state_dict(
-            {k: v.clone() for k, v in self.model.state_dict().items()}
+        clone.prompt_template = self.prompt_template
+        clone.max_new_tokens = self.max_new_tokens
+        clone.model = AutoModelForCausalLM.from_config(
+            self.model.config,
+            dtype=next(self.model.parameters()).dtype,
         )
+        clone.model.load_state_dict(self.model.state_dict(), assign=True)
+        clone.model.to(self.device)
         clone.model.eval()
         clone.device = self.device
+        clone._owned: set = set()
         clone._mlp_modules = clone._locate_mlp_modules()
         clone._hooks = []
         clone._captured = {}
         return clone
 
+    def _ensure_owned(self, proj):
+        """Copy-on-write: clone the weight tensor before mutating it."""
+        weight = proj.weight
+        if self._owned is not None and id(weight) not in self._owned:
+            new_weight = self._torch.nn.Parameter(
+                weight.detach().clone(), requires_grad=False
+            )
+            setattr(proj, "weight", new_weight)
+            self._owned.add(id(new_weight))
+            weight = new_weight
+        return weight
+
     def apply_scale(self, layer: int, neuron: int, scale: float) -> None:
-        mlp = self._mlp_modules[layer]
+        mlp, attr = self._mlp_modules[layer]
+        proj = getattr(mlp, attr)
+        weight = self._ensure_owned(proj)
         with self._torch.no_grad():
-            mlp.down_proj.weight[neuron, :] *= scale
+            weight[neuron, :] *= scale
