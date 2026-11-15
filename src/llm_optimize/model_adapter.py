@@ -36,6 +36,10 @@ class ModelAdapter(Protocol):
         """Return mean activation per layer: {layer_index: array[n_neurons]}."""
         ...
 
+    def per_question_activations(self, texts: Sequence[str]) -> Dict[int, np.ndarray]:
+        """Return per-question activations: {layer: array[n_questions, n_neurons]}."""
+        ...
+
     def copy(self) -> "ModelAdapter":
         """Return a deep, independent copy so patches can be tested safely."""
         ...
@@ -117,16 +121,25 @@ class MockModel:
             return "WRONG"
         return question.expected_answer
 
-    def activations(self, texts: Sequence[str]) -> ActivationMap:
-        sums: Dict[int, np.ndarray] = {
-            layer: np.zeros(self.n_neurons) for layer in range(self.n_layers)
+    def per_question_activations(self, texts: Sequence[str]) -> Dict[int, np.ndarray]:
+        result: Dict[int, List[np.ndarray]] = {
+            layer: [] for layer in range(self.n_layers)
         }
         for text in texts:
             acts, _ = self._forward(text)
             for layer, act in acts.items():
-                sums[layer] += act
-        n = max(len(texts), 1)
-        return {layer: s / n for layer, s in sums.items()}
+                result[layer].append(act)
+        return {
+            layer: np.stack(rows) if rows else np.zeros((0, self.n_neurons))
+            for layer, rows in result.items()
+        }
+
+    def activations(self, texts: Sequence[str]) -> ActivationMap:
+        per_question = self.per_question_activations(texts)
+        return {
+            layer: values.mean(axis=0) if values.size else np.zeros(self.n_neurons)
+            for layer, values in per_question.items()
+        }
 
     def copy(self) -> "MockModel":
         clone = MockModel(
@@ -212,7 +225,7 @@ class TransformersAdapter:
         new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
-    def activations(self, texts: Sequence[str]) -> ActivationMap:
+    def per_question_activations(self, texts: Sequence[str]) -> Dict[int, np.ndarray]:
         self._captured.clear()
         self._install_hooks()
         try:
@@ -221,11 +234,18 @@ class TransformersAdapter:
                 self.model(**inputs)
         finally:
             self._remove_hooks()
-        result: ActivationMap = {}
+        result: Dict[int, np.ndarray] = {}
         for layer, tensor in self._captured.items():
-            act = tensor.abs().mean(dim=(0, 1)).cpu().numpy()
+            act = tensor.abs().mean(dim=1).cpu().numpy()
             result[layer] = act
         return result
+
+    def activations(self, texts: Sequence[str]) -> ActivationMap:
+        per_question = self.per_question_activations(texts)
+        return {
+            layer: values.mean(axis=0) if values.size else np.zeros(values.shape[1])
+            for layer, values in per_question.items()
+        }
 
     def copy(self) -> "TransformersAdapter":
         clone = TransformersAdapter.__new__(TransformersAdapter)

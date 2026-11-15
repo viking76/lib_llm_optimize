@@ -96,6 +96,41 @@ hyper-activé sur certaines questions : le pipeline le détecte, propose un
 dampening de ses poids sortants, le valide (100 % d'échecs corrigés, 0 %
 de régression) et rejette les patchs bruités.
 
+## Algorithme statistique d'optimisation des poids (v0.2)
+
+Le chemin par défaut (`WeightEditor` + `Validator`) propose des patchs à échelle
+fixe (α = 0.3). Pour un finetuning plus fin, `GreedyPatchOptimizer` améliore
+l'algorithme sur trois plans :
+
+1. **Classement statistique des candidats** (`stats.py`) : au lieu du simple
+   ratio de moyennes, chaque neuron est noté par **delta de Cliff** (taille
+   d'effet robuste entre activations des échecs et de la baseline, par
+   question) × **spécificité** (parmi les questions où le neuron est le plus
+   actif, quelle fraction sont des échecs). Un neuron qui feu aussi sur les
+   questions réussies est rétrogradé avant toute recherche coûteuse.
+2. **Recherche d'échelle (line search)** : l'ampleur de la correction n'est
+   plus devinée. Une grille d'échelles est évaluée sur une copie du modèle
+   sous l'objectif
+   `J = fix_rate − λ·regression_rate − μ·|1 − scale|` :
+   on récompense la réparation, on punit lourdement les régressions (λ = 5)
+   et on préfère l'édition la moins invasive à efficacité égale (μ = 0.05).
+3. **Composition gloutonne** : les candidats sont accumulés dans une édition
+   combinée ; une addition n'est conservée que si elle améliore l'objectif
+   global. Les interactions entre neurons sont ainsi prises en compte et le
+   livrable est **une** édition de poids finale, re-validée de bout en bout.
+
+```python
+from llm_optimize import GreedyPatchOptimizer, Orchestrator, Validator
+
+report = Orchestrator(
+    model,
+    optimizer=GreedyPatchOptimizer(validator=Validator()),
+).run(questions, results, top_k_neurons=20, trace_method="effect")
+
+print(report.optimization.combined_fix_rate)     # ex. 1.0
+print(report.optimization.combined_patches)      # l'édition finale recommandée
+```
+
 ## Types de patchs proposés
 
 | Type | Condition | Édition |
