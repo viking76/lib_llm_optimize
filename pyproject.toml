@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-optimize"
+version = "0.1.0"
+description = "Targeted LLM repair: mine evaluation failures, trace differential neurons, propose and validate weight patches."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "viking76" }]
+keywords = ["llm", "evaluation", "mechanistic-interpretability", "neurons", "model-editing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+hf = ["torch>=2.1", "transformers>=4.40"]
+dev = ["pytest>=8.0"]
+
+[project.urls]
+Repository = "https://github.com/viking76/lib_llm_optimize"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
