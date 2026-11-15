@@ -72,25 +72,11 @@ class Validator:
         )
         return verdicts
 
-    def regression_sample(self, passing: Sequence[Question]) -> List[Question]:
+    def _sample(self, passing: Sequence[Question]) -> List[Question]:
         if len(passing) <= self.regression_sample_size:
             return list(passing)
         rng = random.Random(self.seed)
         return rng.sample(list(passing), self.regression_sample_size)
-
-    def measure_fix_rate(self, model: ModelAdapter, questions: Sequence[Question]) -> float:
-        return self._fix_rate(model, questions)
-
-    def measure_regression_rate(
-        self,
-        reference: ModelAdapter,
-        candidate: ModelAdapter,
-        passing: Sequence[Question],
-    ) -> float:
-        return self._regression_rate(reference, candidate, passing)
-
-    def _sample(self, passing: Sequence[Question]) -> List[Question]:
-        return self.regression_sample(passing)
 
     def _fix_rate(self, candidate: ModelAdapter, failed: Sequence[Question]) -> float:
         if not failed:

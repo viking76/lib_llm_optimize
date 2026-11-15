@@ -10,14 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from llm_optimize import (
-    EvalResult,
-    GreedyPatchOptimizer,
-    MockModel,
-    Orchestrator,
-    Question,
-    Validator,
-)
+from llm_optimize import EvalResult, MockModel, Orchestrator, Question
 
 TRIGGER = "zebra"
 
@@ -44,10 +37,7 @@ def build_dataset():
 def main() -> None:
     model = MockModel(trigger_words=[TRIGGER], quirk_layer=0, seed=3)
     questions, results = build_dataset()
-    report = Orchestrator(
-        model,
-        optimizer=GreedyPatchOptimizer(validator=Validator()),
-    ).run(questions, results, top_k_neurons=5, trace_method="effect")
+    report = Orchestrator(model).run(questions, results, top_k_neurons=5)
     print(report.to_markdown())
 
 
