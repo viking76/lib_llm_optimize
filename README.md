@@ -108,16 +108,29 @@ l'algorithme sur trois plans :
    question) × **spécificité** (parmi les questions où le neuron est le plus
    actif, quelle fraction sont des échecs). Un neuron qui feu aussi sur les
    questions réussies est rétrogradé avant toute recherche coûteuse.
-2. **Recherche d'échelle (line search)** : l'ampleur de la correction n'est
-   plus devinée. Une grille d'échelles est évaluée sur une copie du modèle
-   sous l'objectif
-   `J = fix_rate − λ·regression_rate − μ·|1 − scale|` :
+2. **Recherche d'échelle avec raffinement (line search + zoom)** : l'ampleur
+   de la correction n'est plus devinée. Une grille grossière d'échelles est
+   évaluée sur une copie du modèle, puis **raffinée itérativement** autour du
+   meilleur candidat (zoom ×0.9…×1.1), sous l'objectif
+   `J = fix_rate − λ·régressions − μ·|1 − scale|` :
    on récompense la réparation, on punit lourdement les régressions (λ = 5)
    et on préfère l'édition la moins invasive à efficacité égale (μ = 0.05).
-3. **Composition gloutonne** : les candidats sont accumulés dans une édition
-   combinée ; une addition n'est conservée que si elle améliore l'objectif
-   global. Les interactions entre neurons sont ainsi prises en compte et le
-   livrable est **une** édition de poids finale, re-validée de bout en bout.
+   Sur la démo, le raffinement trouve ×0.84 là où la grille fixe s'arrêtait
+   à ×0.8 — même réparation, intervention plus douce.
+3. **Calibration rank-one (inspirée de ROME)** : quand aucune échelle
+   mono-neuron ne suffit (défaillance conjointe de plusieurs neurons, déficit
+   absolu…), l'optimiseur propose une édition rank-one de la couche :
+   `ΔW = −γ · (sortie_moyenne_échecs − sortie_moyenne_baseline) · k*ᵀ / (k*ᵀk*)`
+   où `k*` est l'entrée moyenne de la couche sur les questions échouées.
+   C'est la correction de norme minimale qui ramène la réponse de la couche
+   au niveau baseline sur la clé d'échec. Un coût fixe (ρ = 0.2) la pénalise
+   légèrement : les éditions par échelle, plus interprétables, restent
+   prioritaires quand elles suffisent.
+4. **Composition gloutonne** : les candidats des deux types (échelle et
+   rank-one) sont accumulés dans une édition combinée ; une addition n'est
+   conservée que si elle améliore strictement l'objectif global. Les
+   interactions entre neurons sont prises en compte et le livrable est
+   **une** édition de poids finale, re-validée de bout en bout.
 
 ```python
 from llm_optimize import GreedyPatchOptimizer, Orchestrator, Validator

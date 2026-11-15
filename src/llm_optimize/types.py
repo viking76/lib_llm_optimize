@@ -52,14 +52,21 @@ class WeightPatch:
     """A candidate weight edit proposed by the Weight Editor."""
 
     patch_id: str
-    kind: str  # "dampen" | "boost"
+    kind: str  # "dampen" | "boost" | "rank_one"
     layer: int
     neuron: int
     scale: float
     evidence: NeuronEvidence
     failed_categories: List[str] = field(default_factory=list)
+    key_vector: Any = None
+    delta_vector: Any = None
 
     def describe(self) -> str:
+        if self.kind == PatchKind.RANK_ONE.value:
+            return (
+                f"rank-one calibration on layer {self.layer} "
+                f"(dW = {self.scale:.2f} . dv (k*)^T, ||k*||={float(self.key_vector @ self.key_vector) if self.key_vector is not None else 0.0:.3f})"
+            )
         return (
             f"{self.kind} W_out[{self.neuron}, :] by scale={self.scale:.3f} "
             f"on layer {self.layer}"
@@ -78,6 +85,16 @@ class PatchValidation:
 
 
 @dataclass
+class CandidateEval:
+    """A candidate edit (scale or rank-one) with its measured objective."""
+
+    patch: WeightPatch
+    objective: float
+    fix_rate: float
+    regression_rate: float
+
+
+@dataclass
 class ScaleSearchResult:
     """Best scale found by the line search for one candidate neuron."""
 
@@ -87,6 +104,7 @@ class ScaleSearchResult:
     objective: float
     fix_rate: float
     regression_rate: float
+    patch: WeightPatch = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -94,6 +112,7 @@ class OptimizationResult:
     """Output of the statistical patch optimizer."""
 
     searched: List[ScaleSearchResult] = field(default_factory=list)
+    rank_one_candidates: List[CandidateEval] = field(default_factory=list)
     combined_patches: List[WeightPatch] = field(default_factory=list)
     combined_fix_rate: float = 0.0
     combined_regression_rate: float = 0.0
@@ -198,3 +217,4 @@ class Report:
 class PatchKind(str, Enum):
     DAMPEN = "dampen"
     BOOST = "boost"
+    RANK_ONE = "rank_one"

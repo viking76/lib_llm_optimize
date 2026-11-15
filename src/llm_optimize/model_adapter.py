@@ -40,6 +40,14 @@ class ModelAdapter(Protocol):
         """Return per-question activations: {layer: array[n_questions, n_neurons]}."""
         ...
 
+    def layer_inputs(self, texts: Sequence[str]) -> Dict[int, np.ndarray]:
+        """Return per-question layer inputs: {layer: array[n_questions, in_dim]}."""
+        ...
+
+    def apply_rank_one(self, layer: int, key: np.ndarray, delta: np.ndarray) -> None:
+        """Add the rank-one update dW = outer(delta, key) to a layer's weights."""
+        ...
+
     def copy(self) -> "ModelAdapter":
         """Return a deep, independent copy so patches can be tested safely."""
         ...
@@ -78,6 +86,9 @@ class MockModel:
         trigger_words: Sequence[str] = (),
         quirk_layer: int = 0,
         seed: int = 0,
+        missing_words: Sequence[str] = (),
+        missing_neuron: int = 1,
+        missing_threshold: float = 1.0,
     ) -> None:
         if quirk_layer != 0:
             raise ValueError("MockModel injects the quirk neuron on layer 0")
@@ -85,6 +96,9 @@ class MockModel:
         self.n_neurons = n_neurons
         self.feature_dim = feature_dim
         self.trigger_words = list(trigger_words)
+        self.missing_words = list(missing_words)
+        self.missing_neuron = missing_neuron
+        self.missing_threshold = missing_threshold
         self.quirk_layer = quirk_layer
         rng = np.random.default_rng(seed)
         self.weights: List[np.ndarray] = [
@@ -102,6 +116,14 @@ class MockModel:
             if norm > 0:
                 self.quirk_row /= norm
             self.weights[quirk_layer][self.quirk_neuron] = self.quirk_row * 7.0
+        if self.missing_words:
+            missing_row = np.zeros(feature_dim)
+            for word in self.missing_words:
+                missing_row += _bow(word, feature_dim)
+            norm = np.linalg.norm(missing_row)
+            if norm > 0:
+                missing_row /= norm
+            self.weights[quirk_layer][self.missing_neuron] = missing_row * 5.0
 
     def _forward(self, text: str) -> Tuple[ActivationMap, float]:
         features = _bow(text, self.feature_dim)
@@ -116,7 +138,12 @@ class MockModel:
         return acts, quirk_act
 
     def answer(self, question: Question) -> str:
-        _, quirk_act = self._forward(question.text)
+        acts, quirk_act = self._forward(question.text)
+        if self.missing_words:
+            missing_act = float(acts[self.quirk_layer][self.missing_neuron])
+            if missing_act < self.missing_threshold:
+                return "WRONG"
+            return question.expected_answer
         if quirk_act > 2.0:
             return "WRONG"
         return question.expected_answer
@@ -134,6 +161,25 @@ class MockModel:
             for layer, rows in result.items()
         }
 
+    def layer_inputs(self, texts: Sequence[str]) -> Dict[int, np.ndarray]:
+        result: Dict[int, List[np.ndarray]] = {
+            layer: [] for layer in range(self.n_layers)
+        }
+        for text in texts:
+            hidden = _bow(text, self.feature_dim)
+            for layer, W in enumerate(self.weights):
+                result[layer].append(hidden)
+                act = np.maximum(W @ hidden, 0.0)
+                hidden = act / (np.linalg.norm(act) + 1e-9)
+        in_dim = self.weights[0].shape[1]
+        return {
+            layer: np.stack(rows) if rows else np.zeros((0, in_dim))
+            for layer, rows in result.items()
+        }
+
+    def apply_rank_one(self, layer: int, key: np.ndarray, delta: np.ndarray) -> None:
+        self.weights[layer] += np.outer(delta, key)
+
     def activations(self, texts: Sequence[str]) -> ActivationMap:
         per_question = self.per_question_activations(texts)
         return {
@@ -148,6 +194,9 @@ class MockModel:
             feature_dim=self.feature_dim,
             trigger_words=self.trigger_words,
             quirk_layer=self.quirk_layer,
+            missing_words=self.missing_words,
+            missing_neuron=self.missing_neuron,
+            missing_threshold=self.missing_threshold,
         )
         clone.weights = [W.copy() for W in self.weights]
         return clone
@@ -246,6 +295,38 @@ class TransformersAdapter:
             layer: values.mean(axis=0) if values.size else np.zeros(values.shape[1])
             for layer, values in per_question.items()
         }
+
+    def layer_inputs(self, texts: Sequence[str]) -> Dict[int, np.ndarray]:
+        captured: Dict[int, List["torch.Tensor"]] = {}
+        pre_hooks: list = []
+
+        def make_pre_hook(layer: int):
+            def hook(_module, args):
+                captured.setdefault(layer, []).append(args[0].detach())
+
+            return hook
+
+        try:
+            for layer, mlp in enumerate(self._mlp_modules):
+                pre_hooks.append(mlp.register_forward_pre_hook(make_pre_hook(layer)))
+            inputs = self._encode(texts)
+            with self._torch.no_grad():
+                self.model(**inputs)
+        finally:
+            for hook in pre_hooks:
+                hook.remove()
+        return {
+            layer: self._torch.cat(chunks, dim=0).abs().mean(dim=1).cpu().numpy()
+            for layer, chunks in captured.items()
+        }
+
+    def apply_rank_one(self, layer: int, key, delta) -> None:
+        mlp = self._mlp_modules[layer]
+        with self._torch.no_grad():
+            mlp.down_proj.weight += self._torch.as_tensor(
+                np.outer(delta, key), dtype=mlp.down_proj.weight.dtype,
+                device=mlp.down_proj.weight.device,
+            )
 
     def copy(self) -> "TransformersAdapter":
         clone = TransformersAdapter.__new__(TransformersAdapter)

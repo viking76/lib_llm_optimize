@@ -31,7 +31,7 @@ def dataset():
         for i in range(6)
     ]
     passing_qs = [
-        Question(id=f"p{i}", text=f"what color is the sky sample {i}", expected_answer="blue", category="facts")
+        Question(id=f"p{i}", text=f"what color is the mountain sample {i}", expected_answer="blue", category="facts")
         for i in range(12)
     ]
     results = [
@@ -78,8 +78,8 @@ def test_statistical_ranker_demotes_shared_neurons(model):
     assert abs(evidence[0].effect_size) < 1.0
 
 
-def test_optimizer_finds_milder_scale_than_default(model, dataset):
-    """Line search should pick the least invasive scale that still fixes all."""
+def test_optimizer_refines_scale_beyond_coarse_grid(model, dataset):
+    """Zoom refinement should beat the coarse grid and stay minimally invasive."""
     questions, results = dataset
     failed = [q for q in questions if q.id.startswith("f")]
     passing = [q for q in questions if q.id.startswith("p")]
@@ -90,9 +90,50 @@ def test_optimizer_finds_milder_scale_than_default(model, dataset):
     quirk = next(
         s for s in result.searched if (s.evidence.layer, s.evidence.neuron) == (0, 0)
     )
-    assert quirk.best_scale == 0.8
+    assert 0.8 < quirk.best_scale <= 0.8572
     assert quirk.fix_rate == pytest.approx(1.0)
     assert quirk.regression_rate == 0.0
+
+
+def test_rank_one_repairs_joint_failure_beyond_scaling(model):
+    """A missing-neuron failure that no per-neuron scale can fix is repaired
+    by the rank-one layer calibration."""
+    missing_model = MockModel(
+        trigger_words=[TRIGGER],
+        missing_words=["mountain"],
+        quirk_layer=0,
+        seed=3,
+    )
+    failed_qs = [
+        Question(id=f"f{i}", text=f"what color is a {TRIGGER} number {i}", expected_answer="pink", category="reasoning")
+        for i in range(6)
+    ]
+    passing_qs = [
+        Question(id=f"p{i}", text=f"what color is the mountain sample {i}", expected_answer="blue", category="facts")
+        for i in range(12)
+    ]
+    for q in failed_qs:
+        assert missing_model.answer(q) == "WRONG"
+    for q in passing_qs:
+        assert missing_model.answer(q) == "blue"
+
+    evidence = ActivationTracer(missing_model).trace(
+        failed_qs, passing_qs, top_k=10, method="effect"
+    )
+    result = GreedyPatchOptimizer(validator=Validator()).optimize(
+        missing_model, evidence, failed_qs, passing_qs
+    )
+    assert result.searched == []
+    assert result.rank_one_candidates
+    assert result.combined_accepted
+    assert any(p.kind == "rank_one" for p in result.combined_patches)
+    assert result.combined_fix_rate == pytest.approx(1.0)
+    assert result.combined_regression_rate == 0.0
+    for q in failed_qs:
+        repaired = missing_model.copy()
+        for p in result.combined_patches:
+            GreedyPatchOptimizer._apply(repaired, p)
+        assert repaired.answer(q) == "pink"
 
 
 def test_optimizer_combined_edit_accepted_and_noise_filtered(model, dataset):
